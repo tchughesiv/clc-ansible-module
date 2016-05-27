@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-# Copyright 2015 CenturyLink
-# 
+# Copyright 2016 CenturyLink
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,7 +14,7 @@
 # limitations under the License.
 
 '''
-CenturyLink Cloud dynamic inventory script
+CenturyLink Cloud Dynamic Inventory Script
 ==========================================
 
 This script returns an inventory to Ansible by making calls to the
@@ -29,11 +29,18 @@ with control portal credentials in the format of:
 These credentials are required to use the CLC API and must be provided.
 
 This script returns all information about hosts in the inventory _meta dictionary.
-
 The following information is returned for each host:
+    - ansible_ssh_user: Set to root (for linux) or administrator (for windows)
     - ansible_ssh_host:  Set to the first internal ip address
     - clc_custom_fields:  A dictionary of custom fields set on the server in the Control Portal
     - clc_data:  A dictionary of all the data returned by the API
+
+getpw
+=====
+Uncommenting the "getpw" variable will return server password data for each host. This is helpful, for example, when adding authorization keys to servers.
+e.g. ansible-playbook authorized_keys.yml
+Returns:
+    - ansible_ssh_pass: Sets password for root (linux) or administrator (windows)
 '''
 
 #  @author: Brian Albrecht
@@ -49,8 +56,9 @@ import json
 import clc
 from clc import CLCException, APIFailedResponse
 
+### uncomment "getpw" variable to return ansible_ssh_pass for servers
+# getpw = True
 HOSTVAR_POOL_CNT = 25
-
 
 def main():
     '''
@@ -197,11 +205,15 @@ def _find_hostvars_single_server(server_id):
             return
 
         result[server.name] = {
+            'ansible_ssh_user': 'root',
             'ansible_ssh_host': server.data['details']['ipAddresses'][0]['internal'],
             'clc_data': server.data,
             'clc_custom_fields': server.data['details']['customFields']
         }
+
         result = _add_windows_hostvars(result, server)
+        result = _add_server_cred_hostvars(result, server, server_id, session)
+
     except (CLCException, APIFailedResponse, KeyError):
         return  # Skip any servers that return bad data or an api exception
 
@@ -215,12 +227,33 @@ def _add_windows_hostvars(hostvars, server):
     '''
     if 'windows' in hostvars[server.name]['clc_data']['os']:
         windows_hostvars = {
+            'ansible_ssh_user': 'administrator',
             'ansible_ssh_port': 5986,
-            'ansible_connection': 'winrm'
+            'ansible_connection': 'winrm',
+            'ansible_winrm_server_cert_validation': 'ignore',
+            'ansible_python_interpreter': 'python.exe'
         }
         hostvars[server.name].update(windows_hostvars)
     return hostvars
 
+def _add_server_cred_hostvars(hostvars, server, server_id, session):
+    '''
+    Add server specific password hostvar
+    :return: server specific password hostvar
+    '''
+    if 'getpw' in globals():
+        creds_obj = clc.v2.API.Call(method='GET',
+                                         url='servers/{0}/{1}/credentials'.format(clc.ALIAS, server_id),
+                                         payload={},
+                                         session=session)
+
+        creds = clc.v2.Server(id=server_id, server_obj=creds_obj)
+
+        server_pw = {
+            'ansible_ssh_pass': creds.data['password']
+        }
+        hostvars[server.name].update(server_pw)
+    return hostvars
 
 def _build_hostvars_dynamic_groups(hostvars):
     '''
@@ -292,7 +325,7 @@ def _is_list_flat(lst):
     :param lst: list to check
     :return: True if any value in the list is not an iterable
     '''
-    result = True if len(lst) == 0 else False 
+    result = True if len(lst) == 0 else False
     i = 0
     while i < len(lst) and not result:
         result |= (
